@@ -88,7 +88,7 @@
                 <div id="my-avatar" class="w-8 h-8 rounded-full flex items-center justify-center font-bold text-white cursor-pointer bg-indigo-500">?</div>
                 <div class="flex-1 min-w-0">
                     <div id="my-username" class="text-sm font-semibold truncate leading-tight">User</div>
-                    <div class="text-xs text-green-500 truncate leading-tight">Online</div>
+                    <div id="connection-status" class="text-xs text-yellow-500 truncate leading-tight">Connecting...</div>
                 </div>
                 <div class="flex space-x-1">
                     <button onclick="toggleMic()" class="p-1.5 hover:bg-[#3f4147] rounded text-gray-400 hover:text-gray-200">
@@ -243,26 +243,22 @@
             initApp();
         });
 
-        function initApp() {
-            // Load Cache
-            try {
-                const cached = localStorage.getItem('html-discord-messages');
-                if (cached) {
-                    messages = JSON.parse(cached);
-                    renderMessages();
-                }
-            } catch (e) { console.warn('Local storage disabled'); }
-
-            renderMembers();
-            if (defaultChannel !== 'general') {
-                switchChannel(defaultChannel, 'text'); // simplistic handling
+        function connectWebSocket() {
+            const statusEl = document.getElementById('connection-status');
+            if (statusEl) {
+                statusEl.innerText = "Connecting...";
+                statusEl.className = "text-xs text-yellow-500 truncate leading-tight";
             }
 
-            // Connect WebSockets
             try {
-                ws = new WebSocket(PUBLIC_WS_URL);
+                // Using an alternative cluster URL that is more stable
+                ws = new WebSocket("wss://free.blr2.piesocket.com/v3/html_discord_clone?api_key=VCXCEuvhGcBDP7XhiJJUDvR1e1D3eiVjgZ9VRiaV&notify_self=1");
                 
                 ws.onopen = () => {
+                    if (statusEl) {
+                        statusEl.innerText = "Connected (Global)";
+                        statusEl.className = "text-xs text-green-500 truncate leading-tight";
+                    }
                     ws.send(JSON.stringify({ type: 'presence', profile }));
                 };
                 
@@ -286,17 +282,47 @@
                     }
                 };
                 
-                ws.onerror = () => showError("WebSocket connection failed.");
+                ws.onerror = () => {
+                    console.warn("WebSocket connection error.");
+                };
+
+                ws.onclose = () => {
+                    if (statusEl) {
+                        statusEl.innerText = "Disconnected - Retrying";
+                        statusEl.className = "text-xs text-red-500 truncate leading-tight";
+                    }
+                    // Auto-reconnect after 3 seconds
+                    setTimeout(connectWebSocket, 3000); 
+                };
             } catch (e) {
-                showError("WebSockets blocked.");
+                showError("WebSockets blocked by browser sandbox.");
             }
+        }
+
+        function initApp() {
+            // Load Cache
+            try {
+                const cached = localStorage.getItem('html-discord-messages');
+                if (cached) {
+                    messages = JSON.parse(cached);
+                    renderMessages();
+                }
+            } catch (e) { console.warn('Local storage disabled'); }
+
+            renderMembers();
+            if (defaultChannel !== 'general') {
+                switchChannel(defaultChannel, 'text'); // simplistic handling
+            }
+
+            // Connect WebSockets
+            connectWebSocket();
         }
 
         // Send Message Handler
         chatForm.addEventListener('submit', (e) => {
             e.preventDefault();
             const text = chatInput.value.trim();
-            if (!text || !profile || !ws) return;
+            if (!text || !profile) return;
 
             const msg = {
                 id: `msg-${Date.now()}-${Math.floor(Math.random()*1000)}`,
@@ -309,10 +335,25 @@
             
             chatInput.value = '';
             
-            if (ws.readyState === WebSocket.OPEN) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'message', msg }));
+                
+                // Optimistically render it locally immediately
+                if (!messages.find(m => m.id === msg.id)) {
+                    messages.push(msg);
+                    if (messages.length > 100) messages.shift();
+                    try { localStorage.setItem('html-discord-messages', JSON.stringify(messages)); } catch (e) {}
+                    renderMessages();
+                }
             } else {
-                showError("Not connected to server.");
+                // Offline Fallback: Render locally anyway so the UI doesn't feel broken
+                showError("Offline mode: Message saved locally.");
+                if (!messages.find(m => m.id === msg.id)) {
+                    messages.push(msg);
+                    if (messages.length > 100) messages.shift();
+                    try { localStorage.setItem('html-discord-messages', JSON.stringify(messages)); } catch (e) {}
+                    renderMessages();
+                }
             }
         });
 
