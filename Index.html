@@ -1,0 +1,579 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { 
+  Hash, 
+  Volume2, 
+  Settings, 
+  Plus, 
+  Compass, 
+  Download, 
+  Mic, 
+  MicOff,
+  Headphones, 
+  Send,
+  User,
+  Users,
+  MonitorUp,
+  MonitorOff,
+  PhoneOff,
+  Trash2
+} from 'lucide-react';
+
+// Using a free public WebSocket relay for serverless global messaging
+const PUBLIC_WS_URL = "wss://demo.piesocket.com/v3/discord_clone_global?api_key=VCXCEuvhGcBDP7XhiJJUDvR1e1D3eiVjgZ9VRiaV&notify_self=1";
+
+export default function App() {
+  const [profile, setProfile] = useState(null);
+  const [inputText, setInputText] = useState('');
+  
+  // Local state for our peer-to-peer network
+  const [members, setMembers] = useState([]);
+  const [messages, setMessages] = useState([]);
+  
+  const messagesEndRef = useRef(null);
+
+  const videoRef = useRef(null);
+  const micStreamRef = useRef(null);
+  const screenStreamRef = useRef(null);
+  const [activeChannel, setActiveChannel] = useState({ name: 'general', type: 'text' });
+  const [inVoice, setInVoice] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [isDeafened, setIsDeafened] = useState(false);
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [errorMsg, setErrorMsg] = useState(null);
+  
+  // Reference to our real-time socket
+  const wsRef = useRef(null);
+
+  // Auth and Real-time Sync 
+  useEffect(() => {
+    if (!profile) return;
+
+    // 1. Safely load our local cache (LocalDB)
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        const cached = localStorage.getItem('discord-clone-messages');
+        if (cached) {
+          setMessages(JSON.parse(cached));
+          scrollToBottom();
+        }
+      }
+    } catch (e) {
+      console.warn("Local storage is restricted in this environment.", e);
+    }
+
+    // 2. Connect to the public WebSockets for real-time user-to-user chatting
+    let ws;
+    try {
+      ws = new WebSocket(PUBLIC_WS_URL);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        ws.send(JSON.stringify({ type: 'presence', profile }));
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          
+          if (data.type === 'message') {
+            setMessages(prev => {
+              if (prev.some(m => m.id === data.msg.id)) return prev;
+              const newMsgs = [...prev, data.msg].slice(-100);
+              
+              // Safely save to local cache
+              try {
+                if (typeof window !== 'undefined' && window.localStorage) {
+                  localStorage.setItem('discord-clone-messages', JSON.stringify(newMsgs));
+                }
+              } catch (e) {
+                // Ignore storage errors silently during runtime
+              }
+              return newMsgs;
+            });
+            scrollToBottom();
+          } else if (data.type === 'presence') {
+            setMembers(prev => {
+              if (prev.some(m => m.id === data.profile.id)) return prev;
+              return [...prev, data.profile];
+            });
+          }
+        } catch (err) {
+          console.error("Message parsing error", err);
+        }
+      };
+
+      ws.onerror = () => {
+        setErrorMsg("Failed to connect to the real-time chat relay.");
+      };
+    } catch (err) {
+      setErrorMsg("WebSockets are blocked in this environment.");
+    }
+
+    return () => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      }
+    };
+  }, [profile]); 
+
+  useEffect(() => {
+    return () => {
+      if (micStreamRef.current) micStreamRef.current.getTracks().forEach(t => t.stop());
+      if (screenStreamRef.current) screenStreamRef.current.getTracks().forEach(t => t.stop());
+    };
+  }, []);
+
+  const joinVoice = async (channelName) => {
+    setActiveChannel({ name: channelName, type: 'voice' });
+    setInVoice(true);
+    setErrorMsg(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStreamRef.current = stream;
+      setIsMuted(false);
+    } catch (err) {
+      console.error("Mic access denied", err);
+      setErrorMsg("Microphone access denied or not supported in this environment.");
+    }
+  };
+
+  const leaveVoice = () => {
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach(t => t.stop());
+      micStreamRef.current = null;
+    }
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach(t => t.stop());
+      screenStreamRef.current = null;
+    }
+    if (videoRef.current) videoRef.current.srcObject = null;
+    setInVoice(false);
+    setIsScreenSharing(false);
+    setActiveChannel({ name: 'general', type: 'text' });
+  };
+
+  const toggleScreenShare = async () => {
+    setErrorMsg(null);
+    if (isScreenSharing) {
+      if (screenStreamRef.current) {
+        screenStreamRef.current.getTracks().forEach(t => t.stop());
+        screenStreamRef.current = null;
+      }
+      if (videoRef.current) videoRef.current.srcObject = null;
+      setIsScreenSharing(false);
+    } else {
+      try {
+        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        screenStreamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+        }
+        setIsScreenSharing(true);
+        stream.getVideoTracks()[0].onended = () => {
+          if (screenStreamRef.current) {
+            screenStreamRef.current.getTracks().forEach(t => t.stop());
+            screenStreamRef.current = null;
+          }
+          if (videoRef.current) videoRef.current.srcObject = null;
+          setIsScreenSharing(false);
+        };
+      } catch (err) {
+        console.error("Screen share denied", err);
+        setErrorMsg("Screen sharing is restricted by permissions in this sandbox environment.");
+      }
+    }
+  };
+
+  const toggleMic = () => {
+    if (micStreamRef.current) {
+      const audioTrack = micStreamRef.current.getAudioTracks()[0];
+      if (audioTrack) {
+        audioTrack.enabled = !audioTrack.enabled;
+        setIsMuted(!audioTrack.enabled);
+      }
+    } else {
+      setIsMuted(!isMuted);
+    }
+  };
+
+  const scrollToBottom = () => {
+    setTimeout(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, 100);
+  };
+
+  const handleCreateProfile = (username) => {
+    if (!username.trim()) return;
+    
+    const color = `#${Math.floor(Math.random()*16777215).toString(16).padStart(6, '0')}`;
+    const newProfile = {
+      id: `user-${Date.now()}-${Math.floor(Math.random()*1000)}`, // Unique ID
+      username: username.trim(),
+      color: color,
+      joinedAt: Date.now(),
+      isOnline: true
+    };
+    
+    setProfile(newProfile);
+    setMembers([newProfile]); // Add ourselves locally first
+  };
+
+  const handleClearCache = async () => {
+    if (!profile) return;
+    try {
+      // Safely clear local browser cache
+      if (typeof window !== 'undefined' && window.localStorage) {
+        localStorage.removeItem('discord-clone-messages');
+      }
+      setMessages([]);
+    } catch (e) {
+      console.error("Failed to clear cache - storage may be restricted", e);
+      setMessages([]); // Still clear UI state even if localStorage fails
+    }
+  };
+
+  const handleSendMessage = async (e) => {
+    e.preventDefault();
+    if (!inputText.trim() || !profile) return;
+
+    const newMsg = {
+      id: `msg-${Date.now()}-${Math.floor(Math.random()*1000)}`,
+      text: inputText.trim(),
+      senderId: profile.id,
+      senderName: profile.username,
+      senderColor: profile.color,
+      timestamp: Date.now(),
+    };
+    
+    setInputText('');
+    
+    try {
+      // Send over public WebSocket to other users
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: 'message', msg: newMsg }));
+      } else {
+        setErrorMsg("Not connected to chat network.");
+      }
+    } catch (err) {
+      console.error("Failed to send", err);
+      setErrorMsg("Failed to send message.");
+    }
+  };
+
+  if (!profile) {
+    return <SetupScreen onSubmit={handleCreateProfile} />;
+  }
+
+  return (
+    <div className="flex h-screen w-screen bg-[#313338] text-gray-200 overflow-hidden font-sans relative">
+      
+      {/* Error Banner */}
+      {errorMsg && (
+        <div className="absolute top-0 left-0 right-0 bg-red-500 text-white flex items-center justify-center py-2 px-4 z-50 shadow-md">
+          <span className="flex-1 text-center text-sm font-medium">{errorMsg}</span>
+          <button onClick={() => setErrorMsg(null)} className="text-white hover:text-gray-200 font-bold ml-4">
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* 1. Server Sidebar (Far Left) */}
+      <div className="w-[72px] bg-[#1e1f22] flex flex-col items-center py-3 space-y-2 flex-shrink-0 z-20">
+        <ServerIcon icon={<Hash className="w-6 h-6 text-gray-200" />} active />
+        <div className="w-8 h-[2px] bg-[#313338] rounded-full my-2"></div>
+        <ServerIcon text="G" color="bg-indigo-500" />
+        <ServerIcon text="R" color="bg-emerald-500" />
+        <ServerIcon icon={<Plus className="w-6 h-6 text-green-500" />} hoverColor="hover:bg-green-500 hover:text-white" bg="bg-[#313338]" />
+        <ServerIcon icon={<Compass className="w-6 h-6 text-green-500" />} hoverColor="hover:bg-green-500 hover:text-white" bg="bg-[#313338]" />
+      </div>
+
+      {/* 2. Channel Sidebar */}
+      <div className="w-60 bg-[#2b2d31] flex flex-col flex-shrink-0">
+        {/* Server Header */}
+        <div className="h-12 border-b border-[#1f2023] shadow-sm flex items-center px-4 font-bold hover:bg-[#3f4147] cursor-pointer transition-colors">
+          Local Multi-Tab Server
+        </div>
+        
+        {/* Channel List */}
+        <div className="flex-1 overflow-y-auto p-2 scrollbar-hide">
+          <div className="mt-4 mb-1">
+            <span className="text-xs font-semibold text-gray-400 uppercase flex items-center px-2">
+              Text Channels
+            </span>
+          </div>
+          <ChannelItem name="general" active={activeChannel.name === 'general' && activeChannel.type === 'text'} onClick={() => setActiveChannel({ name: 'general', type: 'text' })} icon={<Hash className="w-4 h-4 text-gray-400 mr-1.5" />} />
+          <ChannelItem name="random" active={activeChannel.name === 'random' && activeChannel.type === 'text'} onClick={() => setActiveChannel({ name: 'random', type: 'text' })} icon={<Hash className="w-4 h-4 text-gray-400 mr-1.5" />} />
+          <ChannelItem name="help" active={activeChannel.name === 'help' && activeChannel.type === 'text'} onClick={() => setActiveChannel({ name: 'help', type: 'text' })} icon={<Hash className="w-4 h-4 text-gray-400 mr-1.5" />} />
+          
+          <div className="mt-6 mb-1">
+            <span className="text-xs font-semibold text-gray-400 uppercase flex items-center px-2">
+              Voice Channels
+            </span>
+          </div>
+          <ChannelItem name="Lounge" active={activeChannel.name === 'Lounge' && activeChannel.type === 'voice'} onClick={() => joinVoice('Lounge')} icon={<Volume2 className="w-4 h-4 text-gray-400 mr-1.5" />} />
+        </div>
+
+        {/* Current User Panel */}
+        <div className="h-[52px] bg-[#232428] flex items-center px-2 space-x-2 flex-shrink-0">
+          <div 
+            className="w-8 h-8 rounded-full flex items-center justify-center font-bold text-white cursor-pointer hover:opacity-80"
+            style={{ backgroundColor: profile.color }}
+          >
+            {profile.username.charAt(0).toUpperCase()}
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="text-sm font-semibold truncate leading-tight">{profile.username}</div>
+            <div className="text-xs text-gray-400 truncate leading-tight text-[11px]">Online (Tab)</div>
+          </div>
+          <div className="flex space-x-1">
+            <button onClick={toggleMic} className="p-1.5 hover:bg-[#3f4147] rounded text-gray-400 hover:text-gray-200">
+              {isMuted ? <MicOff className="w-4 h-4 text-red-500" /> : <Mic className="w-4 h-4" />}
+            </button>
+            <button onClick={() => setIsDeafened(!isDeafened)} className="p-1.5 hover:bg-[#3f4147] rounded text-gray-400 hover:text-gray-200">
+              <Headphones className={`w-4 h-4 ${isDeafened ? 'text-red-500' : ''}`} />
+            </button>
+            <button className="p-1.5 hover:bg-[#3f4147] rounded text-gray-400 hover:text-gray-200"><Settings className="w-4 h-4" /></button>
+          </div>
+        </div>
+      </div>
+
+      {/* 3. Main Chat Area */}
+      <div className="flex-1 flex flex-col min-w-0 bg-[#313338]">
+        {activeChannel.type === 'text' ? (
+          <>
+            {/* Chat Header */}
+            <div className="h-12 border-b border-[#1f2023] flex items-center px-4 shadow-sm flex-shrink-0 justify-between">
+              <div className="flex items-center">
+                <Hash className="w-6 h-6 text-gray-400 mr-2" />
+                <span className="font-semibold text-white">{activeChannel.name}</span>
+              </div>
+              <div className="flex items-center space-x-4 text-gray-400">
+                <button onClick={handleClearCache} className="hover:text-red-400 flex items-center text-xs px-2 py-1 rounded bg-[#2b2d31] transition-colors" title="Clear Message Cache">
+                  <Trash2 className="w-4 h-4 mr-1" /> Clear Cache
+                </button>
+                <Users className="w-5 h-5 hover:text-gray-200 cursor-pointer lg:hidden" />
+              </div>
+            </div>
+
+            {/* Messages List */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+              {/* Welcome Message */}
+              <div className="mt-4 mb-8">
+                <div className="w-16 h-16 bg-[#4752c4] rounded-full flex items-center justify-center mb-4 text-white">
+                  <Hash className="w-10 h-10" />
+                </div>
+                <h1 className="text-3xl font-bold text-white mb-2">Welcome to #{activeChannel.name}!</h1>
+                <p className="text-gray-400">Open this preview in a new tab to see messages sync instantly!</p>
+              </div>
+
+              {messages.map((msg, index) => {
+                const isConsecutive = index > 0 && messages[index - 1].senderId === msg.senderId && (msg.timestamp - messages[index - 1].timestamp) < 300000;
+                
+                return (
+                  <div key={msg.id} className="group">
+                    {!isConsecutive ? (
+                      <div className="flex items-start mt-4">
+                        <div 
+                          className="w-10 h-10 rounded-full flex items-center justify-center font-bold text-white mr-4 mt-0.5 flex-shrink-0"
+                          style={{ backgroundColor: msg.senderColor || '#5865F2' }}
+                        >
+                          {msg.senderName?.charAt(0).toUpperCase() || '?'}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-baseline">
+                            <span className="font-semibold text-indigo-400 hover:underline cursor-pointer mr-2">
+                              {msg.senderName}
+                            </span>
+                            <span className="text-xs text-gray-400 ml-2">
+                              {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                          </div>
+                          <div className="text-gray-200 break-words leading-relaxed whitespace-pre-wrap">
+                            {msg.text}
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-start mt-1">
+                        <div className="w-10 mr-4 flex-shrink-0 text-right opacity-0 group-hover:opacity-100">
+                          <span className="text-[10px] text-gray-400 align-middle">
+                            {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          </span>
+                        </div>
+                        <div className="flex-1 min-w-0 text-gray-200 break-words leading-relaxed whitespace-pre-wrap">
+                          {msg.text}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              <div ref={messagesEndRef} />
+            </div>
+
+            {/* Message Input */}
+            <div className="px-4 pb-4 pt-2 flex-shrink-0">
+              <form onSubmit={handleSendMessage} className="bg-[#383a40] rounded-lg flex items-center px-4 py-2">
+                <Plus className="w-6 h-6 text-gray-400 hover:text-gray-200 cursor-pointer mr-4 bg-[#2b2d31] rounded-full p-1" />
+                <input
+                  type="text"
+                  value={inputText}
+                  onChange={(e) => setInputText(e.target.value)}
+                  placeholder={`Message #${activeChannel.name}`}
+                  className="flex-1 bg-transparent text-gray-200 placeholder-gray-500 focus:outline-none"
+                />
+                <button type="submit" disabled={!inputText.trim()} className="ml-2 text-indigo-400 hover:text-indigo-300 disabled:opacity-50">
+                  <Send className="w-5 h-5" />
+                </button>
+              </form>
+            </div>
+          </>
+        ) : (
+          <div className="flex-1 flex flex-col bg-black">
+            {/* Voice/Video Header */}
+            <div className="h-12 border-b border-[#1f2023] bg-[#313338] flex items-center px-4 shadow-sm flex-shrink-0 justify-between">
+              <div className="flex items-center">
+                <Volume2 className="w-6 h-6 text-gray-400 mr-2" />
+                <span className="font-semibold text-white">{activeChannel.name}</span>
+              </div>
+            </div>
+            
+            {/* Video Grid Area */}
+            <div className="flex-1 p-4 flex items-center justify-center relative bg-gray-900 overflow-hidden">
+              {isScreenSharing ? (
+                <video 
+                  ref={videoRef} 
+                  autoPlay 
+                  playsInline 
+                  muted 
+                  className="max-h-full max-w-full rounded-lg shadow-lg border border-gray-800 object-contain"
+                />
+              ) : (
+                <div className="flex flex-col items-center justify-center text-gray-400">
+                  <div 
+                    className="w-32 h-32 rounded-full flex items-center justify-center font-bold text-white text-4xl mb-6 shadow-2xl"
+                    style={{ backgroundColor: profile.color }}
+                  >
+                    {profile.username.charAt(0).toUpperCase()}
+                  </div>
+                  <p className="text-xl font-medium text-white mb-2">Connected to Voice</p>
+                  <p className="text-sm opacity-60">Click "Share Screen" below to start sharing</p>
+                </div>
+              )}
+            </div>
+
+            {/* Bottom Video Control Bar */}
+            <div className="h-20 bg-[#1e1f22] flex items-center justify-center space-x-6 px-4 pb-2 shrink-0">
+              <button 
+                onClick={toggleMic}
+                className={`p-4 rounded-full flex items-center justify-center transition-colors ${isMuted ? 'bg-white text-gray-900 hover:bg-gray-200' : 'bg-[#313338] text-white hover:bg-[#3f4147]'}`}
+              >
+                {isMuted ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
+              </button>
+              
+              <button 
+                onClick={toggleScreenShare}
+                className={`p-4 rounded-full flex items-center justify-center transition-colors ${isScreenSharing ? 'bg-indigo-500 text-white hover:bg-indigo-600' : 'bg-[#313338] text-white hover:bg-[#3f4147]'}`}
+              >
+                {isScreenSharing ? <MonitorOff className="w-6 h-6" /> : <MonitorUp className="w-6 h-6" />}
+              </button>
+
+              <button 
+                onClick={leaveVoice}
+                className="p-4 rounded-full flex items-center justify-center bg-red-500 hover:bg-red-600 text-white transition-colors"
+              >
+                <PhoneOff className="w-6 h-6" />
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* 4. Members Sidebar (Right) */}
+      <div className="w-60 bg-[#2b2d31] hidden lg:flex flex-col flex-shrink-0 border-l border-[#1f2023]">
+        <div className="p-4 flex-1 overflow-y-auto">
+          <h3 className="text-xs font-semibold text-gray-400 uppercase mb-2">
+            Online — {members.length}
+          </h3>
+          <div className="space-y-1">
+            {members.map(member => (
+              <div key={member.id} className="flex items-center px-2 py-1.5 hover:bg-[#3f4147] rounded cursor-pointer group">
+                <div className="relative">
+                  <div 
+                    className="w-8 h-8 rounded-full flex items-center justify-center font-bold text-white text-sm"
+                    style={{ backgroundColor: member.color || '#5865F2' }}
+                  >
+                    {member.username?.charAt(0).toUpperCase() || '?'}
+                  </div>
+                  <div className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 border-2 border-[#2b2d31] rounded-full group-hover:border-[#3f4147]"></div>
+                </div>
+                <span className="ml-3 font-medium text-gray-300 group-hover:text-gray-100 truncate">
+                  {member.username} {member.id === profile.id && '(You)'}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+    </div>
+  );
+}
+
+function SetupScreen({ onSubmit }) {
+  const [name, setName] = useState('');
+
+  return (
+    <div className="flex items-center justify-center h-screen w-screen bg-[#313338] text-white">
+      <div className="bg-[#313338] p-8 rounded-lg shadow-2xl w-full max-w-md border border-gray-700">
+        <div className="text-center mb-6">
+          <h1 className="text-2xl font-bold mb-2">Welcome to Multi-Tab Chat</h1>
+          <p className="text-gray-400 text-sm">Open this app in multiple tabs to test it!</p>
+        </div>
+        <form onSubmit={(e) => { e.preventDefault(); onSubmit(name); }}>
+          <div className="mb-4">
+            <label className="block text-xs font-bold text-gray-300 uppercase mb-2">
+              Display Name <span className="text-red-500">*</span>
+            </label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="w-full bg-[#1e1f22] border-none text-gray-200 rounded p-3 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              placeholder="What should we call you?"
+              autoFocus
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={!name.trim()}
+            className="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-3 px-4 rounded transition-colors disabled:opacity-50"
+          >
+            Continue
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function ServerIcon({ icon, text, active, color = 'bg-[#313338]', bg = 'bg-[#313338]', hoverColor = 'hover:bg-indigo-500 hover:text-white' }) {
+  return (
+    <div className="relative group flex items-center justify-center cursor-pointer">
+      <div className={`absolute left-0 w-1 bg-white rounded-r-full transition-all duration-300 ${active ? 'h-10' : 'h-0 group-hover:h-5 -ml-3'}`}></div>
+      <div className={`w-12 h-12 flex items-center justify-center rounded-[24px] group-hover:rounded-[16px] transition-all duration-300 overflow-hidden ${active ? 'bg-indigo-500 rounded-[16px] text-white' : `${bg} text-gray-100 ${hoverColor}`} ${text ? color : ''}`}>
+        {icon}
+        {text && <span className="font-medium text-lg">{text}</span>}
+      </div>
+    </div>
+  );
+}
+
+function ChannelItem({ name, active, icon, onClick }) {
+  return (
+    <div onClick={onClick} className={`flex items-center px-2 py-1.5 mx-2 rounded cursor-pointer group mb-0.5 ${active ? 'bg-[#3f4147] text-white' : 'text-gray-400 hover:bg-[#3f4147] hover:text-gray-200'}`}>
+      {icon}
+      <span className="font-medium truncate">{name}</span>
+    </div>
+  );
+}
