@@ -19,6 +19,7 @@
             <div class="text-center mb-6">
                 <h1 class="text-2xl font-bold mb-2">Welcome to Web Chat</h1>
                 <p class="text-gray-400 text-sm">Real-time WebSocket chat via pure HTML!</p>
+                <p class="text-indigo-400 text-xs font-bold mt-2">v1.2.0 - Stable Connection Mode</p>
             </div>
             <form id="setup-form">
                 <div class="mb-4">
@@ -59,8 +60,9 @@
         <!-- Channel Sidebar -->
         <div class="w-60 bg-[#2b2d31] flex flex-col flex-shrink-0">
             <!-- Server Header -->
-            <div id="server-name" class="h-12 border-b border-[#1f2023] shadow-sm flex items-center px-4 font-bold hover:bg-[#3f4147] cursor-pointer transition-colors truncate">
-                Local Server
+            <div class="h-12 border-b border-[#1f2023] shadow-sm flex items-center justify-between px-4 font-bold hover:bg-[#3f4147] cursor-pointer transition-colors">
+                <div id="server-name" class="truncate">Local Server</div>
+                <span class="text-[10px] bg-green-500 text-white px-1.5 py-0.5 rounded ml-2 flex-shrink-0">v1.2.0</span>
             </div>
             
             <!-- Channel List -->
@@ -180,7 +182,11 @@
 
     <script>
         // State
-        const PUBLIC_WS_URL = "wss://demo.piesocket.com/v3/discord_clone_global?api_key=VCXCEuvhGcBDP7XhiJJUDvR1e1D3eiVjgZ9VRiaV&notify_self=1";
+        const PUBLIC_WS_URLS = [
+            "wss://demo.piesocket.com/v3/discord_clone_v3?api_key=VCXCEuvhGcBDP7XhiJJUDvR1e1D3eiVjgZ9VRiaV&notify_self=1",
+            "wss://free.blr2.piesocket.com/v3/discord_clone_v3?api_key=VCXCEuvhGcBDP7XhiJJUDvR1e1D3eiVjgZ9VRiaV&notify_self=1"
+        ];
+        let currentWsIndex = 0;
         let profile = null;
         let ws = null;
         let messages = [];
@@ -247,17 +253,17 @@
             const statusEl = document.getElementById('connection-status');
             if (statusEl) {
                 statusEl.innerText = "Connecting...";
-                statusEl.className = "text-xs text-yellow-500 truncate leading-tight";
+                statusEl.className = "text-xs text-yellow-500 truncate leading-tight font-bold";
             }
 
             try {
-                // Using an alternative cluster URL that is more stable
-                ws = new WebSocket("wss://free.blr2.piesocket.com/v3/html_discord_clone?api_key=VCXCEuvhGcBDP7XhiJJUDvR1e1D3eiVjgZ9VRiaV&notify_self=1");
+                // Using a fallback array for maximum stability
+                ws = new WebSocket(PUBLIC_WS_URLS[currentWsIndex]);
                 
                 ws.onopen = () => {
                     if (statusEl) {
-                        statusEl.innerText = "Connected (Global)";
-                        statusEl.className = "text-xs text-green-500 truncate leading-tight";
+                        statusEl.innerText = "Connected (Live)";
+                        statusEl.className = "text-xs text-green-500 truncate leading-tight font-bold";
                     }
                     ws.send(JSON.stringify({ type: 'presence', profile }));
                 };
@@ -283,16 +289,18 @@
                 };
                 
                 ws.onerror = () => {
-                    console.warn("WebSocket connection error.");
+                    console.warn("WebSocket connection error on " + PUBLIC_WS_URLS[currentWsIndex]);
                 };
 
                 ws.onclose = () => {
                     if (statusEl) {
-                        statusEl.innerText = "Disconnected - Retrying";
-                        statusEl.className = "text-xs text-red-500 truncate leading-tight";
+                        statusEl.innerText = "Reconnecting...";
+                        statusEl.className = "text-xs text-red-500 truncate leading-tight font-bold";
                     }
-                    // Auto-reconnect after 3 seconds
-                    setTimeout(connectWebSocket, 3000); 
+                    // Try next URL in fallback list to ensure we find a working server
+                    currentWsIndex = (currentWsIndex + 1) % PUBLIC_WS_URLS.length;
+                    // Auto-reconnect after 2 seconds
+                    setTimeout(connectWebSocket, 2000); 
                 };
             } catch (e) {
                 showError("WebSockets blocked by browser sandbox.");
